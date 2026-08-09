@@ -101,20 +101,20 @@ class Entity:
                                                    attack_air=True, attack_ground=True)
 
     def get_nearest_target(self):
-        """Find nearest valid target with priority rules.
-        Distance is edge-to-edge (center distance minus both radii), not center-to-center -
-        a Giant and a Skeleton at the same center distance are not equally close in reality,
-        and ranking by raw center distance can pick a different "nearest" target than the real
-        game would, which then compounds into a completely different fight (this is the actual
-        mechanism behind the growing-then-plateauing position error seen in replay comparisons:
-        an early wrong target choice locks in a different but stable trajectory)."""
         building_targets = []
         troop_targets = []
         for entity in list(self.battle_state.entities.values()):
             if not isinstance(entity, Troop) and not isinstance(entity, Building): continue
             if not entity.is_alive or entity.player == self.player: continue
             if not entity.targetable: continue
-            distance = self.position.distance_to(entity.position) - entity.data.collision_radius - self.data.collision_radius
+
+            # FIX: Buildings calculate range from center to target edge.
+            # Troops calculate range from troop edge to target edge.
+            if isinstance(self, Building):
+                distance = self.position.distance_to(entity.position) - entity.data.collision_radius
+            else:
+                distance = self.position.distance_to(entity.position) - entity.data.collision_radius - self.data.collision_radius
+
             if (entity.data.is_air_unit and not self.data.attack_air) or ((not entity.data.is_air_unit) and not self.data.attack_ground):
                 continue
 
@@ -135,12 +135,18 @@ class Entity:
 
     def _should_switch_target(self, current_target, new_target):
         """Determine if we should switch from current target to new target"""
-        # if self.position.distance_to(new_target.position)-current_target.data.collision_radius < self.data.sight_range: return False
         if self.data.target_only_buildings and not isinstance(new_target, Building): return False
         if not new_target:
             return True
-        if self.position.distance_to(current_target.position) <= self.data.range + current_target.data.collision_radius + self.data.collision_radius:
+
+        # FIX: Do not add building.collision_radius to max_range for Buildings
+        max_range = self.data.range + current_target.data.collision_radius
+        if not isinstance(self, Building):
+            max_range += self.data.collision_radius
+
+        if self.position.distance_to(current_target.position) <= max_range:
             return False
+
         # Always switch to troops in sight range (higher priority than buildings)
         is_current_building = isinstance(current_target, Building)
         is_new_troop = not isinstance(new_target, Building)
