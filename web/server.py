@@ -13,6 +13,8 @@ import json
 import os
 import sys
 import uuid
+import urllib.parse
+from fastapi import Request
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +38,18 @@ IMAGES_DIR = os.path.join(SIM_DIR, 'client_side', 'images')
 CARDS = ["Knight", "Giant", "Musketeer", "MiniPekka", "Minions", "Archer", "Fireball", "Arrows"]
 
 app = FastAPI()
+
+@app.middleware("http")
+async def fix_proxy_path_middleware(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if "%3A" in path or "%3a" in path:
+        path = urllib.parse.unquote(path)
+    if path.startswith("http://") or path.startswith("https://"):
+        parsed = urllib.parse.urlparse(path)
+        request.scope["path"] = parsed.path if parsed.path else "/"
+    return await call_next(request)
+
+app.mount("/static", StaticFiles(directory=os.path.join(WEB_DIR, "static")), name="static")
 app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
 
@@ -45,6 +59,7 @@ async def index():
 
 
 @app.get("/api/cards")
+@app.get("/cards")
 async def get_cards():
     out = []
     for name in CARDS:
