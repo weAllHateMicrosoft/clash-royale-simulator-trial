@@ -2,12 +2,19 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Clash Royale Simulator</title>
 <style>
-  body { background:#1a1a2e; color:#eee; font-family: -apple-system, sans-serif; display:flex; flex-direction:column; align-items:center; margin:0; padding:16px; }
+  /* without a viewport meta tag, mobile browsers fake a ~980px-wide desktop layout and zoom
+     the whole page out to fit the real screen - every tap then lands on the wrong element
+     because you're tapping a shrunk, mis-scaled render. The meta tag above fixes that; these
+     rules on top make the layout actually reflow at real phone widths instead of overflowing
+     sideways (which forces pinch-zoom/pan - just as broken for tapping). */
+  * { box-sizing: border-box; }
+  body { background:#1a1a2e; color:#eee; font-family: -apple-system, sans-serif; display:flex; flex-direction:column; align-items:center; margin:0; padding:16px; max-width:100vw; overflow-x:hidden; }
   h1 { font-size:20px; margin:8px 0; }
-  #deckScreen { max-width:640px; }
-  .cardgrid { display:grid; grid-template-columns: repeat(6, 1fr); gap:8px; margin:12px 0; }
+  #deckScreen { max-width:640px; width:100%; }
+  .cardgrid { display:grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap:8px; margin:12px 0; }
   .card { border:3px solid transparent; border-radius:8px; cursor:pointer; text-align:center; background:#222244; padding:4px; }
   .card img { width:100%; border-radius:4px; display:block; }
   .card.selected { border-color:#4caf50; }
@@ -19,13 +26,14 @@
      scrolling - a hand of cards the player has to scroll to find is functionally invisible
      mid-match. Canvas keeps its 396x704 internal drawing resolution; only the CSS display
      size shrinks, so click math has to compensate (see the arena click handler below). */
-  canvas { background:#2d6a2d; border:2px solid #444; max-height:56vh; width:auto; display:block; }
-  #handBar { display:flex; gap:8px; margin-top:8px; }
-  .handcard { width:80px; height:100px; background:#333; border-radius:6px; text-align:center; cursor:pointer; border:3px solid transparent; }
+  canvas { background:#2d6a2d; border:2px solid #444; max-height:56vh; max-width:100%; width:auto; display:block; margin:0 auto; }
+  #gameScreen { width:100%; max-width:396px; display:flex; flex-direction:column; align-items:center; }
+  #handBar { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; justify-content:center; width:100%; }
+  .handcard { width:70px; height:90px; background:#333; border-radius:6px; text-align:center; cursor:pointer; border:3px solid transparent; }
   .handcard.selected { border-color:#ffd700; }
-  .handcard img { width:100%; height:70px; object-fit:cover; border-radius:4px 4px 0 0; }
-  #elixirRow { display:flex; align-items:center; gap:8px; margin-top:8px; }
-  #elixirBar { width:340px; height:20px; background:#333; border-radius:4px; overflow:hidden; position:relative; }
+  .handcard img { width:100%; height:60px; object-fit:cover; border-radius:4px 4px 0 0; }
+  #elixirRow { display:flex; align-items:center; gap:8px; margin-top:8px; width:100%; }
+  #elixirBar { flex:1; min-width:0; height:20px; background:#333; border-radius:4px; overflow:hidden; position:relative; }
   #elixirFill { height:100%; background:#a020f0; width:50%; transition: width 0.2s; }
   #elixirText { position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:bold; text-shadow:0 0 3px #000; }
   #timeDisplay { font-size:13px; font-weight:bold; color:#ddd; white-space:nowrap; }
@@ -47,7 +55,7 @@
 <div id="gameScreen" style="display:none">
   <canvas id="arena" width="396" height="704"></canvas>
   <div id="elixirRow"><div id="elixirBar"><div id="elixirFill"></div><div id="elixirText"></div></div><div id="timeDisplay"></div></div>
-  <div id="placeHint">Tap a card below, then tap the arena to place it.</div>
+  <div id="placeHint">Tap a card below (or press 1-4), then tap the arena to place it.</div>
   <div id="handBar"></div>
   <div id="gameStatus"></div>
 </div>
@@ -224,6 +232,16 @@ function renderHand() {
   });
   document.getElementById('arena').style.cursor = (selectedSlot !== null) ? 'crosshair' : 'default';
 }
+
+// keyboard fallback for selecting a hand card, in case tapping/clicking is unreliable on a
+// given device - number keys mirror clicking the hand card directly.
+document.addEventListener('keydown', (ev) => {
+  if (!['1','2','3','4'].includes(ev.key)) return;
+  const i = parseInt(ev.key, 10) - 1;
+  if (!(state.hand[playerId] || [])[i]) return;
+  selectedSlot = (selectedSlot === i) ? null : i;
+  renderHand();
+});
 
 document.getElementById('arena').addEventListener('click', (ev) => {
   if (!ws || state.game_over) return;
