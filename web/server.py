@@ -7,6 +7,7 @@ Run: uvicorn server:app --host 0.0.0.0 --port 8000   (from this directory)
 Then open http://<host>:8000 in a browser. Share the same URL with a second person (or a
 second browser tab) to get paired into a match.
 """
+SIMULATOR_VERSION = "v0.1.1-tower-range-fix"
 import asyncio
 import json
 import os

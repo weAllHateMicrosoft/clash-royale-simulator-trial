@@ -67,13 +67,13 @@ class Entity:
         """Automatically call entity holder's on_death to prevent bugs"""
         self.is_alive = False
         self.entity_holder.on_death()
+        # King Tower activation when a Princess Tower dies
+        if self.card_name == 'King_PrincessTowers':
+            for entity in self.battle_state.entities.values():
+                if entity.card_name == 'KingTower' and entity.player == self.player:
+                    entity.tower_active = True
 
     def update(self, dt):
-        # This part may be a bit confusing because it doesn't check the `is_alive` and `deploy_delay_remaining` attribute.
-        # Reasons: this will be eventually called by `super()` and won't terminate the actual update function. And
-        # there are miner and drill that needs to be moving before it's even deployed. So this function only updates the buff_time
-        # and debuff_time attribute.
-
         # I assume this function will be called after the deployment and alive check.
         self.entity_holder.on_tick(dt)
         if self.buff_time_remaining > 0:
@@ -88,15 +88,15 @@ class Entity:
     def take_damage(self, amount: float):
         """Apply damage to entity"""
         if self.invincible: return
+        # Activate King Tower on direct damage
+        if self.card_name == 'KingTower' and not self.tower_active:
+            self.tower_active = True
         if not self.shield_health: self.hp -= amount
         else: self.shield_health = max(0, self.shield_health - amount)
-
+        
         if self.hp <= 0 and self.is_alive:
             self.die()
             if self.data.death_damage:
-                # I assume that all death damage deals attack to both air and ground troops.
-                # The game data file hasn't specified what's the radius of the death damage,
-                # so here I just set it to 1 tile
                 self.battle_state.deal_area_damage(self.player, self.position, 1.0+self.data.collision_radius, self.data.death_damage,
                                                    attack_air=True, attack_ground=True)
 
@@ -108,8 +108,7 @@ class Entity:
             if not entity.is_alive or entity.player == self.player: continue
             if not entity.targetable: continue
 
-            # FIX: Buildings calculate range from center to target edge.
-            # Troops calculate range from troop edge to target edge.
+            # For buildings: range is center-to-target-edge (no self.collision_radius)
             if isinstance(self, Building):
                 distance = self.position.distance_to(entity.position) - entity.data.collision_radius
             else:
@@ -118,11 +117,22 @@ class Entity:
             if (entity.data.is_air_unit and not self.data.attack_air) or ((not entity.data.is_air_unit) and not self.data.attack_ground):
                 continue
 
+            # Inactive King Tower targeting rule for pocket deploys
+            effective_distance = distance
+            if entity.card_name == 'KingTower' and isinstance(entity, Building):
+                if not entity.tower_active:
+                    other_princess_alive = any(
+                        e.is_alive and e.player == entity.player and e.card_name == 'King_PrincessTowers'
+                        for e in self.battle_state.entities.values()
+                    )
+                    if other_princess_alive and distance > 4.5:
+                        effective_distance += 4.0
+
             if distance <= self.data.sight_range:
                 if isinstance(entity, Building):
-                    building_targets.append((distance, entity))
+                    building_targets.append((effective_distance, entity))
                 elif not self.data.target_only_buildings:
-                    troop_targets.append((distance, entity))
+                    troop_targets.append((effective_distance, entity))
 
         if self.data.target_only_buildings:
             targets = building_targets
@@ -134,12 +144,11 @@ class Entity:
         else: return targets[0][1]
 
     def _should_switch_target(self, current_target, new_target):
-        """Determine if we should switch from current target to new target"""
         if self.data.target_only_buildings and not isinstance(new_target, Building): return False
         if not new_target:
             return True
 
-        # FIX: Do not add building.collision_radius to max_range for Buildings
+        # For buildings: max reach is range + current_target.collision_radius
         max_range = self.data.range + current_target.data.collision_radius
         if not isinstance(self, Building):
             max_range += self.data.collision_radius
@@ -147,7 +156,6 @@ class Entity:
         if self.position.distance_to(current_target.position) <= max_range:
             return False
 
-        # Always switch to troops in sight range (higher priority than buildings)
         is_current_building = isinstance(current_target, Building)
         is_new_troop = not isinstance(new_target, Building)
         if is_new_troop and is_current_building:
@@ -163,7 +171,6 @@ class Entity:
         if self.target_id is None or \
                 self.target_id not in self.battle_state.entities or \
                 not self.battle_state.entities.get(self.target_id).is_alive:
-            # doesn't have a valid prior target
             self.target_id = None
         else:
             current_target = self.battle_state.entities.get(self.target_id)
@@ -213,7 +220,6 @@ class Troop(Entity):
         self._path_goal_id = None
         self._path_recompute_at = 0.0
 
-
     def to_dict(self):
         d = super().to_dict()
         d.update({'type': 'troop', })
@@ -228,16 +234,13 @@ class Troop(Entity):
         else:
             move_distance = self.speed * dt * self.speed_buff * self.speed_debuff
         move_x, move_y = (dx / distance) * move_distance, (dy / distance) * move_distance
-        # Check if the new position would be walkable (for ground units)
         new_position = Position(self.position.x + move_x, self.position.y + move_y)
 
-        # Air units ignore walkability checks, ground units must check
         if self.data.is_air_unit or (self.battle_state.ground_walkable(new_position, self.data.collision_radius)):
             self.position.x += move_x
             self.position.y += move_y
             self.path_blocked_counter -= 1 if self.path_blocked_counter else 0
         else:
-            # If direct path is blocked, try to find a way around
             self.path_blocked_counter += 1 if self.path_blocked_counter < 1 else 0
             original_angle = math.atan2(move_y, move_x)
             move_distance = math.hypot(move_x, move_y)
@@ -248,25 +251,12 @@ class Troop(Entity):
                 new_move_y = math.sin(new_angle) * move_distance * 1.5
                 if self.battle_state.ground_walkable(Position(self.position.x+new_move_x, self.position.y+new_move_y),
                                                 self.data.collision_radius):
-                    # print('Preparing to move to:', self.position.x+new_move_x, self.position.y+new_move_y)
                     if new_move_x*move_x+new_move_y*move_y >= -0.000001:
                         self.position.x += new_move_x
                         self.position.y += new_move_y
                         break
-                    else:
-                        print('Failed', self.name, new_move_x*move_x+new_move_y*move_y)
-                        pass
 
     def _move_along_path(self, goal_entity: 'Entity', dt: float) -> None:
-        """Move towards goal_entity using real obstacle-avoiding pathfinding instead of
-        the direct-line + local-angle-scan in move_towards. Used specifically for the
-        same-side approach to a current attack target, which is where troops used to
-        visibly loop around a tower/building instead of walking up to it - the old
-        angle-scan has no lookahead, so once it got shoved onto a bad heading near an
-        obstacle's edge it had nothing to correct course with.
-        The goal's own footprint is excluded from the obstacle set so we can path all
-        the way up to attack range against it rather than treating our destination as
-        blocked."""
         need_recompute = (
             self._path_goal_id != goal_entity.id or
             not self._path or
@@ -295,18 +285,10 @@ class Troop(Entity):
             self.position.y += move_y
             self.path_blocked_counter -= 1 if self.path_blocked_counter else 0
         else:
-            # A dynamic obstacle (another troop crowding the waypoint) blocked this step -
-            # force a fresh repath next call rather than improvising a local dodge.
             self.path_blocked_counter += 1 if self.path_blocked_counter < 1 else 0
             self._path_recompute_at = 0.0
 
     def _get_pathfind_target(self, target_entity: 'Entity') -> Position:
-        """Get pathfinding target using priority system with advanced post-tower-destruction logic:
-        Air units: 1) Targets in FOV, 2) Towers (fly directly over river)
-        Ground units:
-        - Before first tower destroyed: 1) Troops in sight range, 2) Bridge center, 3) Princess towers
-        - After first tower destroyed: 1) Troops in FOV, 2) Center bridge, 3) Cross bridge if clear, 4) Target buildings
-        """
         final_target = target_entity.position
         need_to_cross = (self.position.y - 16.0) * (final_target.y - 16.0) < 0
         if self.data.is_air_unit or not need_to_cross:
@@ -314,8 +296,7 @@ class Troop(Entity):
         return self._get_basic_pathfind_target()
 
     def _get_basic_pathfind_target(self) -> Position:
-        """If no target in sight, where should the troop walk to? """
-        near_left =  abs(self.position.x - 3.5) < abs(self.position.x - 14.5)
+        near_left = abs(self.position.x - 3.5) < abs(self.position.x - 14.5)
         on_bridge = (abs(self.position.x - (3.5 if near_left else 14.5)) <= 1.5 and
                     abs(self.position.y - 16.0) <= 1.5)
         before_bridge = (self.position.y < 15.0 and self.player==0) or (self.position.y > 17.0 and self.player==1)
@@ -365,14 +346,10 @@ class Troop(Entity):
             super().update(dt)
         if self.deploy_delay_remaining > 0:
             self.deploy_delay_remaining = max(0.0, self.deploy_delay_remaining - dt)
-            return # Haven't finished deploying yet
-        # Logic: the troop may have a current target (or doesn't), and `get_nearest_target` also gives a
-        # recommended target. If current target exists, compare that with the recommendation to see
-        # if it needs to switch. If it doesn't exist, use the best target. However, the best target may also
-        # be none.
+            return
         if self.name != 'Miner':
             super().update(dt)
-        # The miner needs to update before deployment.
+
         if self.jumping_across_river and self.on_both_sides_of_river(self.start_jumping_position):
             self.jumping_across_river = False
             self.data.is_air_unit = Card(self.name).is_air_unit
@@ -380,7 +357,6 @@ class Troop(Entity):
         current_target = self.update_current_target()
 
         if current_target:
-            # Move towards target if out of attack range
             distance = self.position.distance_to(current_target.position)
             if distance > (self.data.range + current_target.data.collision_radius) or self.jumping_across_river:
                 has_jump_ability = self.data.jump_speed and self.on_both_sides_of_river(current_target) and self.near_river()
@@ -389,8 +365,6 @@ class Troop(Entity):
                 else:
                     need_to_cross = (self.position.y - 16.0) * (current_target.position.y - 16.0) < 0
                     if need_to_cross:
-                        # still crossing the bridge - keep the existing bridge-selection heuristic,
-                        # real obstacle avoidance kicks in once we're on the target's side
                         self.move_towards(self._get_basic_pathfind_target(), dt)
                     else:
                         self._move_along_path(current_target, dt)
@@ -406,7 +380,6 @@ class Troop(Entity):
                 else:
                     self.attack_cooldown -= dt*self.speed_buff*self.speed_debuff
         else:
-            # now calculate:
             if self.data.is_air_unit:
                 self.move_towards(self._get_basic_pathfind_target(), dt)
                 return
@@ -479,13 +452,13 @@ class Building(Entity):
 
     def take_damage(self, amount: float):
         super().take_damage(amount)
-        if self.data.name == 'KingTower' and not self.tower_active:
+        if self.card_name == 'KingTower' and not self.tower_active:
             self.tower_active = True
 
     def update(self, dt: float):
         """Update building - only attack, no movement"""
         if not self.is_alive: return
-        if self.data.name == 'KingTower' and not self.tower_active: return
+        if self.card_name == 'KingTower' and not self.tower_active: return
         if self.deploy_delay_remaining > 0:
             self.deploy_delay_remaining = max(0.0, self.deploy_delay_remaining - dt)
             return
@@ -504,12 +477,13 @@ class Building(Entity):
                 target.take_damage(self.data.damage)
             self.attack_cooldown = self.data.hit_speed
 
+
 class Projectile(Entity):
     def __init__(self, id, position, player, source_card_name, target, homing=True, battle_state=None):
         super().__init__(id, position, player, source_card_name)
         self.target_position = Position(target.position.x, target.position.y)
         self.initial_position = Position(self.position.x, self.position.y)
-        self.proj = self.data.projectile_data # a shortcut
+        self.proj = self.data.projectile_data
         self.rolling = bool(self.proj.roll_range)
         self.homing = homing
         self.target = target
@@ -534,16 +508,14 @@ class Projectile(Entity):
             if distance > self.proj.roll_range:
                 self.is_alive = False
                 return
-            # now deal area damage
             for each in self.battle_state.entities.values():
                 if type(each).__name__ in {'Projectile', 'SpawnProjectile', 'RollingProjectile', 'AreaEffect',
-                                              'TimedExplosive'}: continue  # exclude spells or stealth entities
+                                              'TimedExplosive'}: continue
                 if each in self.damage_dealt or each.data.is_air_unit: continue
                 if not each.is_alive or each.player == self.player: continue
                 if each.position.distance_to(self.position) < each.data.collision_radius + self.proj.radius:
                     each.take_damage(self.proj.damage)
                     self.damage_dealt.append(each)
-                    # now knockback
                     direction_vector = complex(each.position.x-self.position.x, each.position.y-self.position.y)
                     direction_vector /= abs(direction_vector)
                     direction_vector *= self.proj.pushback
@@ -570,7 +542,6 @@ class Projectile(Entity):
                     self.target.debuff_time_remaining = self.proj.buff_time
             else:
                 self._deal_splash_damage()
-            # Now handle target buff
 
             self.is_alive = False
         else:
@@ -584,7 +555,6 @@ class Projectile(Entity):
             if entity.data.is_air_unit and not self.proj.hits_air: continue
             if (not entity.data.is_air_unit) and not self.proj.hits_ground: continue
 
-            # Use hitbox-based collision detection for more accurate splash damage
             if entity.position.distance_to(self.target_position) <= (self.proj.radius + entity.data.collision_radius):
                 amount_dealt = self.proj.damage if "King" not in entity.name else round(self.proj.damage * self.proj.crown_tower_percent)
                 entity.take_damage(amount_dealt)
@@ -592,9 +562,6 @@ class Projectile(Entity):
                     entity.speed_debuff = min(1 + self.proj.target_buff['speedMultiplier'] / 100, entity.speed_debuff)
                     entity.debuff_time_remaining = self.proj.buff_time
                 if self.proj.pushback and isinstance(entity, Troop):
-                    # Real knockback distance scales by target weight (measured from telemetry,
-                    # see card_utils._KNOCKBACK_WEIGHT_MULTIPLIER) - a Giant barely moves from a
-                    # Fireball while a Knight gets shoved noticeably further.
                     dist = entity.position.distance_to(self.target_position)
                     if dist > 0:
                         push_dist = self.proj.pushback * entity.data.knockback_multiplier
@@ -607,7 +574,6 @@ class Projectile(Entity):
 
     def _move_towards(self, target_pos, dt):
         """Move towards target position"""
-        # Note: I used a much cleaner way of writing the code.
         direction = complex(target_pos.x - self.position.x, target_pos.y - self.position.y)
         step = direction / abs(direction) * self.proj.speed * dt
         self.position.x += step.real
@@ -636,7 +602,6 @@ class TimedExplosive(Entity):
         self.is_alive = False
 
     def take_damage(self, amount: float):
-        # Bombs does not take damage!
         pass
 
 
@@ -677,7 +642,7 @@ class BattleState:
 
     def in_river(self, position):
         river_tiles = [(0, 15), (0, 16), (1, 15), (1, 16),
-            *[(i, j) for i in range(5, 13) for j in range(15, 17)], # (5, 15) to (12, 16)
+            *[(i, j) for i in range(5, 13) for j in range(15, 17)],
             (16, 15), (16, 16), (17, 15), (17, 16)]
         return (int(position.x), int(position.y)) in river_tiles
 
@@ -686,7 +651,6 @@ class BattleState:
         if isinstance(entity, Building) or isinstance(entity, Projectile): return
 
         if not self.ground_walkable(entity.position, entity.data.collision_radius):
-
             x, y, r = entity.position.x, entity.position.y, entity.data.collision_radius
             push_ratio = 0.5
             if y < push_ratio*r: y=push_ratio*r
@@ -759,9 +723,6 @@ class BattleState:
             self.game_over = True
             min_0_hp = min(each for each in (p0h.king_tower_hp, p0h.left_tower_hp, p0h.right_tower_hp) if each > 0)
             min_1_hp = min(each for each in (p1h.king_tower_hp, p1h.left_tower_hp, p1h.right_tower_hp) if each > 0)
-            # A real draw is possible (rare): if both players' weakest remaining tower is at
-            # exactly the same HP, nobody wins - previously this fell through to always
-            # crediting player 1, which silently made draws impossible.
             if min_0_hp > min_1_hp:
                 self.winner = 0
             elif min_1_hp > min_0_hp:
@@ -787,21 +748,20 @@ class BattleState:
         card_info = Card(card_name)
 
         if card_info.type != 'spell':
-            # Check the deployment area is legit
             if self.is_position_occupied_by_building(position, 0): return False
             if player_id == 0:
                 if position.y <= 1.0 and (position.x <= 6.0 or position.x > 12.0): return False
-                if position.y >= 21.0: return False
+                if position.y >= 21.5: return False
                 elif position.y >= 15.0:
-                    if position.x <= 9:
+                    if position.x <= 9.5:
                         if self.players[1].left_tower_hp > 0: return False
                     else:
                         if self.players[1].right_tower_hp > 0: return False
             elif player_id == 1:
                 if position.y > 31.0 and (position.x <= 6.0 or position.x > 12.0): return False
-                if position.y <= 10: return False
+                if position.y <= 10.5: return False
                 elif position.y <= 17.0:
-                    if position.x <= 9:
+                    if position.x <= 9.5:
                         if self.players[0].left_tower_hp > 0: return False
                     else:
                         if self.players[0].right_tower_hp > 0: return False
@@ -831,13 +791,6 @@ class BattleState:
         return not self.is_position_occupied_by_building(position, mover_radius, exclude_id)
 
     def is_position_occupied_by_building(self, position, mover_radius: float = 0.5, exclude_id=None) -> bool:
-        """Return True when a position overlaps any live building footprint.
-        exclude_id lets a troop approach its own current attack target: a melee
-        unit whose own collision radius is bigger than its attack range (e.g.
-        BattleRam vs a Princess Tower: radius 0.76 + tower 1.5 = 2.26, but attack
-        range + tower radius is only 2.0) could otherwise never get physically
-        close enough to satisfy the attack-range check and would stall forever
-        just outside it."""
         for entity in self.entities.values():
             if not isinstance(entity, Building) or not entity.is_alive:
                 continue
@@ -848,10 +801,6 @@ class BattleState:
         return False
 
     def find_path(self, start, goal, mover_radius, exclude_target_id=None):
-        """A* over a coarse grid, treating live buildings as obstacles inflated by
-        mover_radius - except exclude_target_id, so a troop can path right up to
-        attack range against the building it's actually walking towards instead of
-        treating its own destination as blocked."""
         obstacles = []
         for entity in self.entities.values():
             if not isinstance(entity, Building) or not entity.is_alive:
@@ -867,16 +816,10 @@ class BattleState:
         flying_troops = combinations([each for each in entities_alive if each.data.is_air_unit], 2)
         for troop in (ground_troops, flying_troops):
             for e1, e2 in troop:
-                # Don't shove an attacker back out of its own current target - this used to
-                # override the walkability fix that lets a melee unit whose body is wider than
-                # its attack range (e.g. BattleRam vs a Princess Tower) actually get in range,
-                # by physically pushing it straight back out to the collision-radius boundary
-                # every tick regardless of what movement code allowed.
                 if getattr(e1, 'target_id', None) == e2.id or getattr(e2, 'target_id', None) == e1.id:
                     continue
                 if e1.position.distance_to(e2.position) < e1.data.collision_radius + e2.data.collision_radius:
                     overlap = e1.data.collision_radius + e2.data.collision_radius - e1.position.distance_to(e2.position)
-                    # the direction vector points from e1 to e2
                     direction_vector = complex(e2.position.x-e1.position.x, e2.position.y-e1.position.y)
                     if abs(direction_vector) == 0: return
                     direction_vector /= abs(direction_vector)
@@ -906,5 +849,3 @@ class BattleState:
             elif attack_ground and not entity.data.is_air_unit:
                 if entity.position.distance_to(position) < range:
                     entity.take_damage(amount_dealt)
-
-

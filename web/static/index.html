@@ -5,13 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Clash Royale Simulator</title>
 <style>
-  /* without a viewport meta tag, mobile browsers fake a ~980px-wide desktop layout and zoom
-     the whole page out to fit the real screen - every tap then lands on the wrong element
-     because you're tapping a shrunk, mis-scaled render. The meta tag above fixes that; these
-     rules on top make the layout actually reflow at real phone widths instead of overflowing
-     sideways (which forces pinch-zoom/pan - just as broken for tapping). */
   * { box-sizing: border-box; }
-  body { background:#1a1a2e; color:#eee; font-family: -apple-system, sans-serif; display:flex; flex-direction:column; align-items:center; margin:0; padding:16px; max-width:100vw; overflow-x:hidden; }
+  body { background:#1a1a2e; color:#eee; font-family: -apple-system, sans-serif; display:flex; flex-direction:column; align-items:center; margin:0; padding:16px; max-width:100vw; overflow-x:hidden; user-select: none; }
   h1 { font-size:20px; margin:8px 0; }
   #deckScreen { max-width:640px; width:100%; }
   .cardgrid { display:grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap:8px; margin:12px 0; }
@@ -22,16 +17,13 @@
   button { background:#4caf50; color:white; border:none; padding:10px 20px; border-radius:6px; font-size:16px; cursor:pointer; margin-top:8px; }
   button:disabled { background:#555; cursor:not-allowed; }
   #status { margin:8px 0; color:#aaa; }
-  /* the whole game UI (canvas + hand + status) must fit in a normal browser window without
-     scrolling - a hand of cards the player has to scroll to find is functionally invisible
-     mid-match. Canvas keeps its 396x704 internal drawing resolution; only the CSS display
-     size shrinks, so click math has to compensate (see the arena click handler below). */
-  canvas { background:#2d6a2d; border:2px solid #444; max-height:56vh; max-width:100%; width:auto; display:block; margin:0 auto; }
-  #gameScreen { width:100%; max-width:396px; display:flex; flex-direction:column; align-items:center; }
+  canvas { background:#2d6a2d; border:2px solid #444; max-height:56vh; max-width:100%; width:auto; display:block; margin:0 auto; touch-action: none; }
+  #gameScreen { width:100%; max-width:396px; display:flex; flex-direction:column; align-items:center; position: relative; }
   #handBar { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; justify-content:center; width:100%; }
-  .handcard { width:70px; height:90px; background:#333; border-radius:6px; text-align:center; cursor:pointer; border:3px solid transparent; }
+  .handcard { width:70px; height:90px; background:#333; border-radius:6px; text-align:center; cursor:grab; border:3px solid transparent; user-select: none; touch-action: none; }
+  .handcard:active { cursor: grabbing; }
   .handcard.selected { border-color:#ffd700; }
-  .handcard img { width:100%; height:60px; object-fit:cover; border-radius:4px 4px 0 0; }
+  .handcard img { width:100%; height:60px; object-fit:cover; border-radius:4px 4px 0 0; pointer-events: none; }
   #elixirRow { display:flex; align-items:center; gap:8px; margin-top:8px; width:100%; }
   #elixirBar { flex:1; min-width:0; height:20px; background:#333; border-radius:4px; overflow:hidden; position:relative; }
   #elixirFill { height:100%; background:#a020f0; width:50%; transition: width 0.2s; }
@@ -40,6 +32,12 @@
   #placeHint { font-size:12px; color:#888; margin-top:6px; }
   #gameStatus { margin:8px 0; color:#aaa; min-height:20px; }
   .rejected { color:#ff5555 !important; font-weight:bold; }
+  
+  #dragAvatar {
+    position: fixed; pointer-events: none; width: 34px; height: 34px; border-radius: 50%;
+    border: 2px solid #ffd700; background-size: cover; background-position: center;
+    transform: translate(-50%, -50%); display: none; z-index: 10000; box-shadow: 0 0 10px rgba(0,0,0,0.5);
+  }
 </style>
 </head>
 <body>
@@ -52,13 +50,19 @@
   <div id="status"></div>
 </div>
 
+<div id="app-version" style="position: fixed; bottom: 6px; right: 10px; font-size: 12px; color: #aaa; font-family: monospace; background: rgba(0,0,0,0.6); padding: 3px 8px; border-radius: 4px; pointer-events: none; z-index: 9999;">
+  Ver: v0.1.4-clamped-drag
+</div>
+
 <div id="gameScreen" style="display:none">
   <canvas id="arena" width="396" height="704"></canvas>
   <div id="elixirRow"><div id="elixirBar"><div id="elixirFill"></div><div id="elixirText"></div></div><div id="timeDisplay"></div></div>
-  <div id="placeHint">Tap a card below (or press 1-4), then tap the arena to place it.</div>
+  <div id="placeHint">Drag a card or tap to select, then place it on the arena.</div>
   <div id="handBar"></div>
   <div id="gameStatus"></div>
 </div>
+
+<div id="dragAvatar"></div>
 
 <script>
 const TILE = 22, AX = 0, AY = 0;
@@ -66,9 +70,14 @@ let cards = [];
 let selected = [];
 let ws = null;
 let playerId = null;
-let state = {entities: [], elixir: [5,5], hand: [[],[]], tower_hp: [[0,0,0],[0,0,0]], game_over:false, winner:null};
+let state = {entities: [], elixir: [5,5], hand: [[],[]], game_over:false, winner:null};
 let deck = [];
 let selectedSlot = null;
+
+// Drag state tracking
+let isDragging = false;
+let dragSlot = null;
+let activeDragCoords = null; // Stores [wx, wy] clamped to legal zone
 
 fetch('/api/cards').then(r => r.json()).then(data => {
   cards = data;
@@ -131,7 +140,6 @@ function setStatus(s, isError) {
 }
 
 function w2s(x, y) {
-  // player 0 always rendered at the bottom of their own screen
   if (playerId === 1) { x = 18 - x; y = 32 - y; }
   return [AX + x*TILE, AY + (32-y)*TILE];
 }
@@ -146,24 +154,149 @@ function cardImage(cardName) {
   return img;
 }
 
+function isSpellCard(cardName) {
+  const spellNames = ['Fireball', 'Arrows', 'The Log', 'Zap', 'Lightning', 'Rocket', 'Poison', 'Freeze'];
+  if (spellNames.includes(cardName)) return true;
+  const info = cards.find(c => c.name === cardName);
+  return info && info.type && info.type.toLowerCase() === 'spell';
+}
+
+function isTowerAlive(player, xMin, xMax) {
+  return (state.entities || []).some(e => 
+    e.type === 'building' && 
+    e.card_name === 'King_PrincessTowers' && 
+    e.player === player && 
+    e.hp > 0 && 
+    e.x >= xMin && e.x <= xMax
+  );
+}
+
+function isDeployTileValid(wx, wy, cardName) {
+  if (isSpellCard(cardName)) return true; // Spells target anywhere on map!
+
+  const isRedLeftAlive = isTowerAlive(1, 0, 9);
+  const isRedRightAlive = isTowerAlive(1, 9, 18);
+  const isBlueLeftAlive = isTowerAlive(0, 0, 9);
+  const isBlueRightAlive = isTowerAlive(0, 9, 18);
+
+  if (playerId === 0) { // Blue Player (Bottom)
+    if (wy <= 1.0 && (wx <= 6.0 || wx > 12.0)) return false; // King tower area
+    if (wy >= 21.5) return false;
+    if (wy < 15.0) return true; // Own territory
+
+    // Pocket deployment
+    if (wx <= 9.5 && !isRedLeftAlive) return true;
+    if (wx > 8.5 && !isRedRightAlive) return true;
+    return false;
+  } else { // Red Player (Top)
+    if (wy > 31.0 && (wx <= 6.0 || wx > 12.0)) return false;
+    if (wy <= 10.5) return false;
+    if (wy > 17.0) return true; // Own territory
+
+    // Pocket deployment
+    if (wx <= 9.5 && !isBlueLeftAlive) return true;
+    if (wx > 8.5 && !isBlueRightAlive) return true;
+    return false;
+  }
+}
+
+// Clamp mouse/drag position to closest valid tile inside legal zone
+function getClampedValidWorldCoords(wx, wy, cardName) {
+  if (isDeployTileValid(wx, wy, cardName)) {
+    return [wx, wy];
+  }
+
+  let bestDist = Infinity;
+  let bestX = wx, bestY = wy;
+  for (let tx = 0; tx < 18; tx++) {
+    for (let ty = 0; ty < 32; ty++) {
+      const testX = tx + 0.5;
+      const testY = ty + 0.5;
+      if (isDeployTileValid(testX, testY, cardName)) {
+        const dist = Math.hypot(testX - wx, testY - wy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestX = testX;
+          bestY = testY;
+        }
+      }
+    }
+  }
+  return [bestX, bestY];
+}
+
 function render() {
   const canvas = document.getElementById('arena');
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#2d6a2d'; ctx.fillRect(0,0,canvas.width,canvas.height);
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
   for (let x=0;x<=18;x++){ ctx.beginPath(); ctx.moveTo(x*TILE,0); ctx.lineTo(x*TILE,32*TILE); ctx.stroke(); }
   for (let y=0;y<=32;y++){ ctx.beginPath(); ctx.moveTo(0,y*TILE); ctx.lineTo(18*TILE,y*TILE); ctx.stroke(); }
+  
+  // River
   ctx.fillStyle = 'rgba(80,150,220,0.4)';
   ctx.fillRect(0, 15*TILE, 18*TILE, 2*TILE);
 
-  // towers drawn first so their range rings sit under troops, not on top of them.
-  // King Tower is dormant (doesn't attack, shouldn't show a threat ring) until it either
-  // takes damage or its side's Princess Tower falls - Princess Towers are always active.
+  // --- DRAW VISUAL DEPLOYMENT ZONE OVERLAY ---
+  const activeSlot = isDragging ? dragSlot : selectedSlot;
+  if (activeSlot !== null) {
+    const hand = state.hand[playerId] || [];
+    const activeCardName = hand[activeSlot];
+    if (activeCardName) {
+      const isSpell = isSpellCard(activeCardName);
+
+      ctx.save();
+      for (let tx = 0; tx < 18; tx++) {
+        for (let ty = 0; ty < 32; ty++) {
+          const wx = tx + 0.5;
+          const wy = ty + 0.5;
+
+          if (isDeployTileValid(wx, wy, activeCardName)) {
+            const [sx, sy] = w2s(wx, wy);
+            ctx.fillStyle = isSpell ? 'rgba(255, 152, 0, 0.22)' : 'rgba(76, 175, 80, 0.28)';
+            ctx.fillRect(sx - TILE/2, sy - TILE/2, TILE, TILE);
+            ctx.strokeStyle = isSpell ? 'rgba(255, 152, 0, 0.5)' : 'rgba(76, 175, 80, 0.5)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(sx - TILE/2, sy - TILE/2, TILE, TILE);
+          }
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  // Draw entities and towers
   for (const e of state.entities) {
     const isKing = e.type === 'building' && e.card_name === 'KingTower';
     const isPrincess = e.type === 'building' && e.card_name === 'King_PrincessTowers';
     if (!e.range || (!isKing && !isPrincess)) continue;
     if (isKing && !e.tower_active) continue;
+    // Draw range rings for active towers
+  for (const e of state.entities) {
+    const isKing = e.type === 'building' && e.card_name === 'KingTower';
+    const isPrincess = e.type === 'building' && e.card_name === 'King_PrincessTowers';
+    if (!e.range || (!isKing && !isPrincess)) continue;
+    
+    // Only show range ring for King Tower if active!
+    if (isKing && !e.tower_active) continue;
+
+    const [sx, sy] = w2s(e.x, e.y);
+    ctx.beginPath();
+    ctx.arc(sx, sy, e.range * TILE, 0, 2 * Math.PI);
+    ctx.strokeStyle = (e.player === playerId) ? 'rgba(77, 166, 255, 0.45)' : 'rgba(255, 85, 85, 0.45)';
+    ctx.lineWidth = isKing ? 2 : 1;
+    ctx.stroke();
+
+    // Draw '👑 ACTIVE' crown badge above active King Towers
+    if (isKing && e.tower_active) {
+      ctx.fillStyle = '#ffd700';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('👑 ACTIVE', sx, sy - 22);
+    }
+  }
     const [sx, sy] = w2s(e.x, e.y);
     ctx.beginPath();
     ctx.arc(sx, sy, e.range * TILE, 0, 7);
@@ -191,8 +324,6 @@ function render() {
       ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7); ctx.fill();
       ctx.strokeStyle = '#000'; ctx.stroke();
     }
-    // name label under every entity - the fallback for anything without art (towers,
-    // projectiles) and a readable confirmation of what's on the field either way
     ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
     ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
     ctx.strokeText(e.card_name, sx, sy + r + 10);
@@ -227,42 +358,121 @@ function renderHand() {
     const div = document.createElement('div');
     div.className = 'handcard' + (selectedSlot === i ? ' selected' : '');
     div.innerHTML = `<img src="/images/${encodeURIComponent(info ? info.englishName : name)}.png" onerror="this.style.opacity=0.3"><div style="font-size:10px">${name}</div>`;
-    div.onclick = () => { selectedSlot = (selectedSlot === i) ? null : i; renderHand(); };
+    
+    const startDrag = (e) => {
+      e.preventDefault();
+      selectedSlot = i;
+      isDragging = true;
+      dragSlot = i;
+      const avatar = document.getElementById('dragAvatar');
+      avatar.style.backgroundImage = `url(/images/${encodeURIComponent(info ? info.englishName : name)}.png)`;
+      avatar.style.display = 'block';
+      updateDragAvatar(e);
+      render();
+    };
+
+    div.onmousedown = startDrag;
+    div.ontouchstart = startDrag;
+
     bar.appendChild(div);
   });
   document.getElementById('arena').style.cursor = (selectedSlot !== null) ? 'crosshair' : 'default';
 }
 
-// keyboard fallback for selecting a hand card, in case tapping/clicking is unreliable on a
-// given device - number keys mirror clicking the hand card directly.
+function updateDragAvatar(e) {
+  const canvas = document.getElementById('arena');
+  const rect = canvas.getBoundingClientRect();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+  const hand = state.hand[playerId] || [];
+  const cardName = hand[dragSlot];
+
+  if (cardName) {
+    const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+    let rawWx = ((clientX - rect.left) * scaleX) / TILE;
+    let rawWy = 32 - ((clientY - rect.top) * scaleY) / TILE;
+    if (playerId === 1) { rawWx = 18 - rawWx; rawWy = 32 - rawWy; }
+
+    // Clamp world coordinates to legal boundary
+    const [clampedWx, clampedWy] = getClampedValidWorldCoords(rawWx, rawWy, cardName);
+    activeDragCoords = [clampedWx, clampedWy];
+
+    // Convert clamped world coordinates back to screen pixels
+    const [sx, sy] = w2s(clampedWx, clampedWy);
+    const screenX = rect.left + (sx / scaleX);
+    const screenY = rect.top + (sy / scaleY);
+
+    const avatar = document.getElementById('dragAvatar');
+    avatar.style.left = screenX + 'px';
+    avatar.style.top = screenY + 'px';
+  }
+}
+
+function handlePointerMove(e) {
+  if (!isDragging) return;
+  updateDragAvatar(e);
+}
+
+function handlePointerUp(e) {
+  if (!isDragging) return;
+  document.getElementById('dragAvatar').style.display = 'none';
+  isDragging = false;
+
+  if (activeDragCoords && ws && !state.game_over && selectedSlot !== null) {
+    const hand = state.hand[playerId] || [];
+    const card = hand[selectedSlot];
+    if (card) {
+      const [wx, wy] = activeDragCoords;
+      ws.send(JSON.stringify({type: 'deploy', card, x: wx, y: wy}));
+    }
+  }
+
+  selectedSlot = null;
+  dragSlot = null;
+  activeDragCoords = null;
+  render();
+}
+
+window.addEventListener('mousemove', handlePointerMove);
+window.addEventListener('touchmove', handlePointerMove);
+window.addEventListener('mouseup', handlePointerUp);
+window.addEventListener('touchend', handlePointerUp);
+
+document.getElementById('arena').addEventListener('click', (ev) => {
+  if (isDragging) return;
+  if (selectedSlot === null) {
+    setStatus('Tap or drag a card in your hand first, then place it on the arena.', true);
+    return;
+  }
+  const canvas = ev.target;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
+  let x = ((ev.clientX - rect.left) * scaleX) / TILE;
+  let y = 32 - ((ev.clientY - rect.top) * scaleY) / TILE;
+  if (playerId === 1) { x = 18 - x; y = 32 - y; }
+
+  const hand = state.hand[playerId] || [];
+  const card = hand[selectedSlot];
+
+  if (card && isDeployTileValid(x, y, card)) {
+    ws.send(JSON.stringify({type: 'deploy', card, x, y}));
+  } else if (card) {
+    setStatus(`Cannot deploy ${card} outside legal boundary`, true);
+  }
+
+  selectedSlot = null;
+  render();
+});
+
 document.addEventListener('keydown', (ev) => {
   if (!['1','2','3','4'].includes(ev.key)) return;
   const i = parseInt(ev.key, 10) - 1;
   if (!(state.hand[playerId] || [])[i]) return;
   selectedSlot = (selectedSlot === i) ? null : i;
-  renderHand();
+  render();
 });
 
-document.getElementById('arena').addEventListener('click', (ev) => {
-  if (!ws || state.game_over) return;
-  if (selectedSlot === null) {
-    // clicking the arena with nothing selected used to be a silent no-op - indistinguishable
-    // from the app being broken. Tell the player what to do instead.
-    setStatus('Tap a card in your hand first, then tap the arena to place it.', true);
-    return;
-  }
-  const rect = ev.target.getBoundingClientRect();
-  // canvas's CSS display size can differ from its internal 396x704 drawing resolution
-  // (responsive scaling) - map the click through that ratio, not raw CSS pixels.
-  const scaleX = ev.target.width / rect.width, scaleY = ev.target.height / rect.height;
-  let x = ((ev.clientX - rect.left) * scaleX) / TILE;
-  let y = 32 - ((ev.clientY - rect.top) * scaleY) / TILE;
-  if (playerId === 1) { x = 18 - x; y = 32 - y; }
-  const hand = state.hand[playerId] || [];
-  const card = hand[selectedSlot];
-  if (card) ws.send(JSON.stringify({type: 'deploy', card, x, y}));
-  selectedSlot = null;
-});
 </script>
 </body>
 </html>
