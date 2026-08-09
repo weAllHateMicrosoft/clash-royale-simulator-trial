@@ -1,0 +1,10 @@
+ideas/
+*.DS_store
+.DS_Store
+src/clahser_new/cr_logs/
+.idea/
+*.xml
+*.iml
+__pycache__/
+*.pyc
+.venv/
