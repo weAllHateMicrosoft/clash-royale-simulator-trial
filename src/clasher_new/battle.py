@@ -8,6 +8,14 @@ import pathfinding
 
 
 class Entity:
+    # Class-level type flags. The simulation's hot loops need to ask "is this a Building /
+    # Projectile / Troop" tens of millions of times per match, and isinstance() was measured
+    # at 61.2M calls / 3.7s in a 10.5s profile. A plain attribute lookup is far cheaper and
+    # exactly equivalent here because these classes are never mixed or dynamically retyped.
+    is_building = False
+    is_projectile = False
+    is_troop = False
+
     def __init__(self, id, position, player, card_name, battle_state: "BattleState" = None):
         # Stores permanent information about this entity like `player` and `card_name`.
         self.id, self.position, self.player, self.card_name, self.battle_state = (id, position, player, card_name, battle_state)
@@ -105,13 +113,12 @@ class Entity:
     def get_nearest_target(self):
         building_targets = []
         troop_targets = []
-        for entity in list(self.battle_state.entities.values()):
-            if not isinstance(entity, Troop) and not isinstance(entity, Building): continue
+        for entity in self.battle_state._combatants:   # maintained index; was a full scan
             if not entity.is_alive or entity.player == self.player: continue
             if not entity.targetable: continue
 
             # For buildings: range is center-to-target-edge (no self.collision_radius)
-            if isinstance(self, Building):
+            if self.is_building:
                 distance = self.position.distance_to(entity.position) - entity.data.collision_radius
             else:
                 distance = self.position.distance_to(entity.position) - entity.data.collision_radius - self.data.collision_radius
@@ -131,7 +138,7 @@ class Entity:
                         effective_distance += 4.0
 
             if distance <= self.data.sight_range:
-                if isinstance(entity, Building):
+                if entity.is_building:
                     building_targets.append((effective_distance, entity))
                 elif not self.data.target_only_buildings:
                     troop_targets.append((effective_distance, entity))
@@ -210,6 +217,7 @@ class Entity:
 
 
 class Troop(Entity):
+    is_troop = True
     def __init__(self, id, position, player, card_name, battle_state=None):
         super().__init__(id, position, player, card_name, battle_state)
         self.deploy_delay_remaining = self.data.deploy_time
@@ -438,6 +446,7 @@ class Troop(Entity):
 
 
 class Building(Entity):
+    is_building = True
     def __init__(self, id, position, player, card_name, persistent=False):
         super().__init__(id, position, player, card_name)
         self.deploy_delay_remaining = self.data.deploy_time
@@ -481,6 +490,7 @@ class Building(Entity):
 
 
 class Projectile(Entity):
+    is_projectile = True
     def __init__(self, id, position, player, source_card_name, target, homing=True, battle_state=None):
         super().__init__(id, position, player, source_card_name)
         self.target_position = Position(target.position.x, target.position.y)
@@ -646,6 +656,12 @@ class BattleState:
         # HP deltas. Not cleared here - whoever reads it (environment.py) drains/clears it.
         self.spell_impact_log = []
 
+        # Append-only indexes maintained by _spawn_entity. Entities are never deleted from
+        # self.entities (death only sets is_alive=False), so these can never become stale;
+        # callers still filter on is_alive exactly as the old full scans did.
+        self._buildings = []
+        self._combatants = []   # Troops and Buildings - i.e. everything targetable
+
         self._spawn_entity(Building(1, self.arena.RED_LEFT_TOWER, 1, 'King_PrincessTowers', True))
         self._spawn_entity(Building(2, self.arena.RED_RIGHT_TOWER, 1, 'King_PrincessTowers', True))
         self._spawn_entity(Building(3, self.arena.BLUE_LEFT_TOWER, 0, 'King_PrincessTowers', True))
@@ -663,7 +679,7 @@ class BattleState:
 
     def ensure_walkability(self, entity):
         if entity.jumping_across_river and self.in_river(entity.position): return
-        if isinstance(entity, Building) or isinstance(entity, Projectile): return
+        if entity.is_building or entity.is_projectile: return
 
         if not self.ground_walkable(entity.position, entity.data.collision_radius):
             x, y, r = entity.position.x, entity.position.y, entity.data.collision_radius
@@ -682,6 +698,10 @@ class BattleState:
         entity.battle_state = self
         entity.id = self.next_entity_id
         self.entities[len(self.entities)+1] = entity
+        if entity.is_building:
+            self._buildings.append(entity)
+        if entity.is_building or entity.is_troop:
+            self._combatants.append(entity)
         self.next_entity_id += 1
 
     def _wrap(self, entity_data):
@@ -806,8 +826,8 @@ class BattleState:
         return not self.is_position_occupied_by_building(position, mover_radius, exclude_id)
 
     def is_position_occupied_by_building(self, position, mover_radius: float = 0.5, exclude_id=None) -> bool:
-        for entity in self.entities.values():
-            if not isinstance(entity, Building) or not entity.is_alive:
+        for entity in self._buildings:   # maintained index; was a full scan + isinstance
+            if not entity.is_alive:
                 continue
             if exclude_id is not None and entity.id == exclude_id:
                 continue
