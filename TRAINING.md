@@ -95,6 +95,55 @@ place; and it says nothing about whether the policy could even act (see the 91% 
 action measurement below). Fixed in `eval_diagnostics.py` — 30 games, win rate plus behavior
 diagnostics, written to `runs/<name>/eval_log.csv`. Re-run before drawing conclusions.
 
+## explained_variance: RESOLVED 2026-08-10
+
+Open across every run this project had done (see the paragraph below, kept for history).
+On the first masked run (`masked_v1`), `train/explained_variance` read **0.444 then 0.538**
+at ~300k steps, having been ~0 (occasionally negative) in every previous run.
+
+Why it was never a separate bug: when ~91% of actions were illegal and silently discarded,
+returns were largely disconnected from what the policy chose, so there was little for the
+value head to learn beyond the mean. Fixing the action space made the critic's job
+tractable. Unlike win rate, this number is trustworthy at face value - it is computed over
+the full 32,768-sample rollout buffer, not a 20-game sample.
+
+Watch that it HOLDS above ~0.4 rather than collapsing later in training.
+
+## Simulator performance: 2.7x, 2026-08-10
+
+Profiling 300 decisions showed cost concentrated in one pattern, not spread out:
+`is_position_occupied_by_building` was 53% of runtime and `builtins.isinstance` was called
+**61,211,192 times** (35%) - hot loops scanning every entity in the match and type-checking
+each. Entities are never removed from `self.entities` (death only sets `is_alive=False`), so
+those scans also walked every corpse accumulated over the match, making late game slower.
+
+Fixed with append-only `_buildings`/`_combatants` indexes maintained in `_spawn_entity`, plus
+`is_building`/`is_troop`/`is_projectile` class flags replacing `isinstance`. Equivalent by
+construction, and verified: `trace_sim.py` runs a fixed scripted match and digests full state
+(positions to 6dp, HP, targets, elixir, towers) every tick - before/after traces are
+byte-identical. **94.1 -> 252.7 decisions/sec.**
+
+Measured throughput on the training machine: 179 fps at 16 envs, ~15,500 matches per 9h
+(previously ~8,000).
+
+## Hardware utilization and hyperparameters
+
+Task Manager during a 16-env run: **CPU 13%, GPU 33%** - the machine was mostly idle.
+`SubprocVecEnv` is synchronous, and every step pushes ~550KB of observations (16 x
+32x18x15 float32) through pipes to be unpickled by a single-threaded main process. That
+serialization, not simulation, is the ceiling; raising `--n-envs` further does not help.
+
+Two levers, now on the CLI, and they are NOT equivalent:
+- `--batch-size`: SB3 defaults to **64**, which with 32,768 samples per rollout means 512
+  minibatches x 10 epochs = 5,120 tiny GPU calls per update - mostly launch overhead. Costs
+  nothing per simulated step. Use 1024-4096.
+- `--net-scale`: multiplies CNN width. This DOES cost throughput, because each worker runs
+  the opponent policy on CPU every step. Measured at batch 1: 0.23ms forward vs 3.96ms of
+  simulation, so scale 2.0 (0.73M -> 2.88M params) costs ~6% fps; scale 3.0 costs ~24%.
+
+Also `--n-steps`, `--n-epochs`, `--features-dim`, `--learning-rate`, `--seed`,
+`--resource-weight`.
+
 Across all three: `train/explained_variance` was near zero (some readings slightly
 negative) in every diagnostic checked so far - only spot-checked early iterations, not the
 full 1M-step curves. **Worth verifying properly before trusting these runs' value
