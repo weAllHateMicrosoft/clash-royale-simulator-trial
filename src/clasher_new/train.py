@@ -18,15 +18,20 @@ import subprocess
 import time
 
 class CRFeatureExtractor(BaseFeaturesExtractor):
-    def __init__(self, observation_space: spaces.Box, features_dim: int = 256):
+    def __init__(self, observation_space: spaces.Box, features_dim: int = 256, net_scale: float = 1.0):
+        """net_scale multiplies every conv width. NOTE this is not a free upgrade: each
+        SubprocVecEnv worker runs the OPPONENT policy's forward pass on CPU every single
+        step, so a wider net slows every worker and costs throughput (games/night), unlike
+        batch_size/n_steps which cost nothing per step. Scale up deliberately."""
         super().__init__(observation_space, features_dim)
         self.embedding_dim = 8
         self.entity_embedding = nn.Embedding(len(entity_names), self.embedding_dim)
         self.in_channels = 13 + self.embedding_dim + 4
+        c1, c2, c3 = (max(8, int(round(c * net_scale))) for c in (32, 64, 64))
         self.cnn = nn.Sequential(
-            nn.Conv2d(self.in_channels, 32, 3, padding=1), nn.ReLU(),
-            nn.Conv2d(32, 64, 3, padding=1, stride=2), nn.ReLU(),
-            nn.Conv2d(64, 64, 3, padding=1, stride=2), nn.ReLU(),
+            nn.Conv2d(self.in_channels, c1, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(c1, c2, 3, padding=1, stride=2), nn.ReLU(),
+            nn.Conv2d(c2, c3, 3, padding=1, stride=2), nn.ReLU(),
             nn.Flatten(),
         )
         with torch.no_grad():
@@ -136,12 +141,20 @@ class RandomEvalCallback(BaseCallback):
         return True
 
 
-def make_ppo(env, device="auto", seed=None):
+def make_ppo(env, device="auto", seed=None, n_steps=2048, batch_size=64,
+              n_epochs=10, features_dim=256, net_scale=1.0, learning_rate=3e-4):
+    """SB3's batch_size default of 64 is a poor fit here: 16 envs x 2048 steps = 32768
+    samples per rollout, which at batch 64 is 512 minibatches x n_epochs tiny GPU calls per
+    update - almost entirely kernel-launch overhead on a modern GPU, and the main reason
+    GPU utilization sat near 33%. Larger batches use the hardware properly and cost nothing
+    in per-step simulation time."""
     return MaskablePPO(
         "MultiInputPolicy", env, verbose=1, tensorboard_log="./tb_logs/", device=device,
-        seed=seed,
+        seed=seed, n_steps=n_steps, batch_size=batch_size, n_epochs=n_epochs,
+        learning_rate=learning_rate,
         policy_kwargs=dict(features_extractor_class=CRFeatureExtractor,
-                            features_extractor_kwargs=dict(features_dim=256)),
+                            features_extractor_kwargs=dict(features_dim=features_dim,
+                                                            net_scale=net_scale)),
     )
 
 
@@ -219,6 +232,24 @@ if __name__ == '__main__':
                               "available, but pass --device cuda explicitly to be certain - "
                               "watch the 'Using ... device' line SB3 prints on startup to "
                               "confirm which one actually got used.")
+    parser.add_argument("--n-steps", type=int, default=2048,
+                         help="Rollout length PER ENV before each PPO update. Total samples "
+                              "per update = n_steps * n_envs. Costs nothing per simulated "
+                              "step; larger means better-conditioned gradient estimates.")
+    parser.add_argument("--batch-size", type=int, default=64,
+                         help="Minibatch size for PPO updates. SB3's default of 64 is far too "
+                              "small for this setup and wastes most of the GPU on kernel "
+                              "launch overhead - 1024-4096 is far better here.")
+    parser.add_argument("--n-epochs", type=int, default=10,
+                         help="Passes over each rollout buffer. More learning per collected "
+                              "sample, at some risk of over-fitting that rollout.")
+    parser.add_argument("--features-dim", type=int, default=256,
+                         help="Width of the final feature layer.")
+    parser.add_argument("--net-scale", type=float, default=1.0,
+                         help="Multiplies every CNN channel width. UNLIKE batch/n-steps this "
+                              "DOES cost throughput: each worker runs the opponent policy on "
+                              "CPU every step, so a wider net slows every worker.")
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--resource-weight", type=float, default=None,
                          help="Overrides BASE_RESOURCE_WEIGHT (the elixir+troop advantage "
                               "shaping term). Pass 0 to turn that shaping OFF entirely, "
@@ -258,6 +289,10 @@ if __name__ == '__main__':
         importlib.reload(environment)
         print(f"Resource shaping weight overridden to {args.resource_weight}")
 
+    ppo_kwargs = dict(n_steps=args.n_steps, batch_size=args.batch_size,
+                       n_epochs=args.n_epochs, features_dim=args.features_dim,
+                       net_scale=args.net_scale, learning_rate=args.learning_rate)
+
     run_name = args.run_name or time.strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join("runs", run_name)
     os.makedirs(run_dir, exist_ok=True)
@@ -289,7 +324,7 @@ if __name__ == '__main__':
             model = load_or_create(starting_checkpoint, setup_env, device=args.device)
         else:
             print("No --checkpoint-name given - starting fresh.")
-            model = make_ppo(setup_env, device=args.device, seed=args.seed)
+            model = make_ppo(setup_env, device=args.device, seed=args.seed, **ppo_kwargs)
         model.tensorboard_log = os.path.join(run_dir, "tb")
 
         # Write the initial opponent checkpoint so worker processes have something to load on
@@ -323,13 +358,16 @@ if __name__ == '__main__':
             model = load_or_create(starting_checkpoint, env, device=args.device)
         else:
             print("No --checkpoint-name given - starting fresh.")
-            model = make_ppo(env, device=args.device, seed=args.seed)
+            model = make_ppo(env, device=args.device, seed=args.seed, **ppo_kwargs)
         model.tensorboard_log = os.path.join(run_dir, "tb")
 
         # self-play opponent starts as a copy of the learner (even a freshly-initialized one) -
         # self-play works by both sides starting equally weak/strong and improving together, it
         # doesn't need a good policy to begin with, just *a* policy.
-        opponent = make_ppo(env, device=args.device)
+        # MUST use the same ppo_kwargs as the learner: the opponent receives the
+        # learner's weights via load_state_dict, which fails outright if the two
+        # networks differ in width (e.g. --net-scale set on one and not the other).
+        opponent = make_ppo(env, device=args.device, **ppo_kwargs)
         opponent.policy.load_state_dict(model.policy.state_dict())
         env.opponent = lambda obs: opponent.predict(obs, deterministic=False)[0]
         weights_cb = WeightsCopyingCallback()
