@@ -341,6 +341,12 @@ if __name__ == '__main__':
         model.learn(total_timesteps=args.timesteps, reset_num_timesteps=False,
                     callback=[cb, weights_cb, eval_cb])
         manifest["status"] = "completed"
+    except KeyboardInterrupt:
+        # Deliberate Ctrl+C is a normal way to end an overnight run - record it as such
+        # rather than "failed", which would imply a crash. The finally block below still
+        # saves the model, so stopping early costs nothing but the remaining steps.
+        manifest["status"] = "stopped_early"
+        print("\nStopped by user - saving model and manifest.")
     except BaseException as e:
         manifest["status"] = "failed"
         manifest["error"] = repr(e)
