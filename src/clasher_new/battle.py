@@ -70,7 +70,7 @@ class Entity:
         # King Tower activation when a Princess Tower dies
         if self.card_name == 'King_PrincessTowers':
             for entity in self.battle_state.entities.values():
-                if entity.card_name == 'KingTower' and entity.player == self.player:
+                if entity.card_name == 'KingTower' and isinstance(entity, Building) and entity.player == self.player:
                     entity.tower_active = True
 
     def update(self, dt):
@@ -88,8 +88,10 @@ class Entity:
     def take_damage(self, amount: float):
         """Apply damage to entity"""
         if self.invincible: return
-        # Activate King Tower on direct damage
-        if self.card_name == 'KingTower' and not self.tower_active:
+        # Activate King Tower on direct damage. Guarded to actual King Tower Building
+        # instances only - a King Tower's own projectile also carries card_name=='KingTower'
+        # for attribution, but isn't a Building and has no tower_active attribute.
+        if self.card_name == 'KingTower' and isinstance(self, Building) and not self.tower_active:
             self.tower_active = True
         if not self.shield_health: self.hp -= amount
         else: self.shield_health = max(0, self.shield_health - amount)
@@ -549,6 +551,7 @@ class Projectile(Entity):
 
     def _deal_splash_damage(self) -> None:
         """Deal damage to entities in splash radius using hitbox overlap detection"""
+        hits = 0
         for entity in list(self.battle_state.entities.values()):
             if entity.invincible: continue
             if entity.player == self.player or not entity.is_alive: continue
@@ -558,6 +561,7 @@ class Projectile(Entity):
             if entity.position.distance_to(self.target_position) <= (self.proj.radius + entity.data.collision_radius):
                 amount_dealt = self.proj.damage if "King" not in entity.name else round(self.proj.damage * self.proj.crown_tower_percent)
                 entity.take_damage(amount_dealt)
+                hits += 1
                 if self.proj.buff_time:
                     entity.speed_debuff = min(1 + self.proj.target_buff['speedMultiplier'] / 100, entity.speed_debuff)
                     entity.debuff_time_remaining = self.proj.buff_time
@@ -571,6 +575,13 @@ class Projectile(Entity):
                         new_pos = Position(entity.position.x + pushed.real, entity.position.y + pushed.imag)
                         if self.battle_state.ground_walkable(new_pos, entity.data.collision_radius):
                             entity.position = new_pos
+        if self.battle_state is not None:
+            # card_name is recorded so the reward can normalize per CAST rather than per
+            # wave. The waves themselves are REAL game behavior - Arrows genuinely strikes
+            # 3 times (3 x 48 damage), it is not an implementation quirk. The problem was
+            # only in how a per-cast reward term counted them: one entry per wave meant a
+            # single wasted Arrows was charged 3x a single wasted Fireball.
+            self.battle_state.spell_impact_log.append((self.player, hits, self.card_name))
 
     def _move_towards(self, target_pos, dt):
         """Move towards target position"""
@@ -630,6 +641,10 @@ class BattleState:
         self.winner = None
         self.next_entity_id = 1
         self.regen = 2.8
+        # (caster_player, entities_hit) appended by every splash-spell impact - lets a caller
+        # (e.g. environment.py's reward) see spell efficiency without re-deriving it from raw
+        # HP deltas. Not cleared here - whoever reads it (environment.py) drains/clears it.
+        self.spell_impact_log = []
 
         self._spawn_entity(Building(1, self.arena.RED_LEFT_TOWER, 1, 'King_PrincessTowers', True))
         self._spawn_entity(Building(2, self.arena.RED_RIGHT_TOWER, 1, 'King_PrincessTowers', True))

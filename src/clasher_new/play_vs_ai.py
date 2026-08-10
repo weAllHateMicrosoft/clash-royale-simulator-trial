@@ -28,12 +28,14 @@ import os
 import sys
 import pygame
 import numpy as np
+import gymnasium as gym
 from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
 
 import battle, player
 from core import Position
 from card_utils import Card, card_data
-from environment import entity_names, card_types, player_1_deck
+from environment import entity_names, card_types, player_1_deck, decode_action, compute_action_masks
 
 CHECKPOINT = sys.argv[1] if len(sys.argv) > 1 else "cr_checkpoint"
 
@@ -162,10 +164,25 @@ def observe(b: "battle.BattleState", player_id_observe):
     }
 
 
-def ai_take_action(b: "battle.BattleState", model: PPO):
+def ai_take_action(b: "battle.BattleState", model, action_masks=None):
     obs1 = observe(b, 1)
-    action, _ = model.predict(obs1, deterministic=True)
-    slot, y, x = action
+    # Masked checkpoints MUST be given the same legality mask they trained with. Without it
+    # the policy samples over actions it never saw as available and mostly picks illegal
+    # ones, so a perfectly good agent looks like it is standing around doing nothing - which
+    # is exactly how "the model does nothing" gets misdiagnosed as a training failure.
+    if action_masks is not None:
+        action, _ = model.predict(obs1, deterministic=True, action_masks=action_masks)
+    else:
+        action, _ = model.predict(obs1, deterministic=True)
+    # Checkpoints trained with the old MultiDiscrete action space hand back a (slot, y, x)
+    # triple directly; checkpoints trained with the newer flat joint action space (see
+    # environment.py's decode_action) hand back a single int that needs decoding. Detected
+    # from the loaded model's own action_space rather than assumed, so this works for either
+    # kind of checkpoint without the caller needing to know which one it is.
+    if isinstance(model.action_space, gym.spaces.Discrete):
+        slot, y, x = decode_action(action)
+    else:
+        slot, y, x = action
     p1 = b.players[1]
     if slot != 0:
         card_name = p1.cycle[slot - 1]
@@ -354,7 +371,9 @@ def play_match(model, human_deck):
             for _ in range(speed):
                 b.step(1 / 60)
                 if b.time >= next_ai_decision:
-                    ai_take_action(b, model)
+                    masks = (compute_action_masks(b, 1)
+                             if isinstance(model, MaskablePPO) else None)
+                    ai_take_action(b, model, action_masks=masks)
                     next_ai_decision = b.time + ai_decision_interval
 
         screen.fill(WHITE)
@@ -369,7 +388,14 @@ def play_match(model, human_deck):
 
 def main():
     print(f"Loading model {CHECKPOINT}.zip ...")
-    model = PPO.load(CHECKPOINT, device="cpu")
+    # Newer checkpoints are MaskablePPO; older ones are plain PPO. Try the masked loader
+    # first and fall back, so any checkpoint in the repo's history still opens.
+    try:
+        model = MaskablePPO.load(CHECKPOINT, device="cpu")
+        print("Loaded as MaskablePPO (action masking active).")
+    except Exception:
+        model = PPO.load(CHECKPOINT, device="cpu")
+        print("Loaded as plain PPO (pre-masking checkpoint, no action masking).")
     while True:
         deck = card_selection_screen()
         play_match(model, deck)

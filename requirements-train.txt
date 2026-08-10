@@ -1,0 +1,18 @@
+# Minimal deps for training/simulation only (train.py, environment.py, battle.py) -
+# no fastapi/uvicorn/starlette/pillow here, those are only needed for the web app (web/server.py).
+fastcore==2.2.4
+gymnasium==1.3.0
+numpy==1.26.4
+pygame==2.6.1
+stable_baselines3==2.9.0
+sb3-contrib==2.9.0
+# ^ provides MaskablePPO - the action-space legality masking. Must match the
+# stable_baselines3 version exactly; sb3-contrib pins a compatible SB3 range and a
+# mismatch surfaces as confusing import/attribute errors, not a clean version error.
+tensorboard==2.21.0
+# ^ not imported directly anywhere in our code, but stable_baselines3 needs it at runtime
+# the moment tensorboard_log is set (which train.py always does) - easy to miss since no
+# static import chain surfaces it, only shows up as a crash mid-run.
+# torch is intentionally NOT pinned here - install it separately first with the CUDA
+# index URL for your platform (see SIMULATOR_STATUS.md / setup instructions), since the
+# plain PyPI torch wheel on Windows is CPU-only regardless of what version you pin.
