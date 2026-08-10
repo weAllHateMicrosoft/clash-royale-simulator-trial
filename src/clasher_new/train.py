@@ -1,4 +1,5 @@
-from environment import CREnv, masked_random_opponent, random_strategy, entity_names
+from environment import (CREnv, masked_random_opponent, random_strategy, entity_names,
+                          SPELL_WHIFF_PENALTY, SPELL_HIT_BONUS)
 from eval_diagnostics import N_EVAL_GAMES, append_eval_row, play_eval_games
 
 from gymnasium import spaces
@@ -135,9 +136,10 @@ class RandomEvalCallback(BaseCallback):
         return True
 
 
-def make_ppo(env, device="auto"):
+def make_ppo(env, device="auto", seed=None):
     return MaskablePPO(
         "MultiInputPolicy", env, verbose=1, tensorboard_log="./tb_logs/", device=device,
+        seed=seed,
         policy_kwargs=dict(features_extractor_class=CRFeatureExtractor,
                             features_extractor_kwargs=dict(features_dim=256)),
     )
@@ -217,6 +219,16 @@ if __name__ == '__main__':
                               "available, but pass --device cuda explicitly to be certain - "
                               "watch the 'Using ... device' line SB3 prints on startup to "
                               "confirm which one actually got used.")
+    parser.add_argument("--resource-weight", type=float, default=None,
+                         help="Overrides BASE_RESOURCE_WEIGHT (the elixir+troop advantage "
+                              "shaping term). Pass 0 to turn that shaping OFF entirely, "
+                              "leaving only tower damage / crowns / win-loss. Running one "
+                              "job with the default and one with 0 is a clean A/B of whether "
+                              "that shaping actually helps - which no run so far has answered.")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Seed for reproducibility. Two runs differing ONLY in seed "
+                              "measure run-to-run variance, which is what tells you whether a "
+                              "gap between two configurations is real or noise.")
     parser.add_argument("--eval-freq", type=int, default=50_000,
                          help="Timesteps between evaluation points. Lower = more points on "
                               "the curve (better for seeing WHEN something changed) at the "
@@ -236,6 +248,16 @@ if __name__ == '__main__':
                               "machine - don't set this to the full core count.")
     args = parser.parse_args()
 
+    # Set BEFORE any env or model is constructed: environment.py reads this at import time,
+    # and SubprocVecEnv workers re-import it in fresh interpreters that inherit os.environ.
+    # Setting it any later would leave workers on the default value.
+    if args.resource_weight is not None:
+        os.environ["CR_RESOURCE_WEIGHT"] = str(args.resource_weight)
+        import importlib
+        import environment
+        importlib.reload(environment)
+        print(f"Resource shaping weight overridden to {args.resource_weight}")
+
     run_name = args.run_name or time.strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join("runs", run_name)
     os.makedirs(run_dir, exist_ok=True)
@@ -246,6 +268,11 @@ if __name__ == '__main__':
         "run_name": run_name, "note": args.note, "args": vars(args),
         "git": git_info(), "start_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "status": "running",
+        "effective_reward": {
+            "resource_weight": os.environ.get("CR_RESOURCE_WEIGHT", "0.05 (default)"),
+            "spell_whiff_penalty": SPELL_WHIFF_PENALTY,
+            "spell_hit_bonus": SPELL_HIT_BONUS,
+        },
     }
     write_manifest(run_dir, manifest)
 
@@ -262,7 +289,7 @@ if __name__ == '__main__':
             model = load_or_create(starting_checkpoint, setup_env, device=args.device)
         else:
             print("No --checkpoint-name given - starting fresh.")
-            model = make_ppo(setup_env, device=args.device)
+            model = make_ppo(setup_env, device=args.device, seed=args.seed)
         model.tensorboard_log = os.path.join(run_dir, "tb")
 
         # Write the initial opponent checkpoint so worker processes have something to load on
@@ -296,7 +323,7 @@ if __name__ == '__main__':
             model = load_or_create(starting_checkpoint, env, device=args.device)
         else:
             print("No --checkpoint-name given - starting fresh.")
-            model = make_ppo(env, device=args.device)
+            model = make_ppo(env, device=args.device, seed=args.seed)
         model.tensorboard_log = os.path.join(run_dir, "tb")
 
         # self-play opponent starts as a copy of the learner (even a freshly-initialized one) -

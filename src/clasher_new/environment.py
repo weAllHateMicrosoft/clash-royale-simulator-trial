@@ -62,7 +62,12 @@ GAMMA = 0.99
 # values - a clean "damage per elixir" constant turned out to be fundamentally confounded
 # (depends on whether/how the opponent defends) and not worth chasing. These get calibrated
 # against real training behavior instead, same as everything else here.
-BASE_RESOURCE_WEIGHT = 0.05
+# Read from the environment so it survives SubprocVecEnv: with 'spawn', each worker is a
+# FRESH interpreter that re-imports this module, so a value patched onto the module object in
+# the parent process would silently NOT reach the workers - the parent's manifest would claim
+# one weight while every worker actually computed rewards with the default. os.environ is
+# inherited by spawned children, so this stays consistent across all processes.
+BASE_RESOURCE_WEIGHT = float(os.environ.get("CR_RESOURCE_WEIGHT", "0.05"))
 OVERFLOW_PENALTY = -0.05
 OVERFLOW_THRESHOLD = 9.9  # "at/near cap" - avoids float-precision edge cases at exactly 10.0
 
