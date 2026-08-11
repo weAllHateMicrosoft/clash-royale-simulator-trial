@@ -142,7 +142,8 @@ class RandomEvalCallback(BaseCallback):
 
 
 def make_ppo(env, device="auto", seed=None, n_steps=2048, batch_size=64,
-              n_epochs=10, features_dim=256, net_scale=1.0, learning_rate=3e-4):
+              n_epochs=10, features_dim=256, net_scale=1.0, learning_rate=3e-4,
+              ent_coef=0.0):
     """SB3's batch_size default of 64 is a poor fit here: 16 envs x 2048 steps = 32768
     samples per rollout, which at batch 64 is 512 minibatches x n_epochs tiny GPU calls per
     update - almost entirely kernel-launch overhead on a modern GPU, and the main reason
@@ -151,7 +152,7 @@ def make_ppo(env, device="auto", seed=None, n_steps=2048, batch_size=64,
     return MaskablePPO(
         "MultiInputPolicy", env, verbose=1, tensorboard_log="./tb_logs/", device=device,
         seed=seed, n_steps=n_steps, batch_size=batch_size, n_epochs=n_epochs,
-        learning_rate=learning_rate,
+        learning_rate=learning_rate, ent_coef=ent_coef,
         policy_kwargs=dict(features_extractor_class=CRFeatureExtractor,
                             features_extractor_kwargs=dict(features_dim=features_dim,
                                                             net_scale=net_scale)),
@@ -199,13 +200,25 @@ def write_manifest(run_dir, data):
         json.dump(data, f, indent=2, default=str)
 
 
-def make_env_fn(opponent_checkpoint_path):
+def make_env_fn(opponent_checkpoint_path, pool_dir=None, scripted_prob=0.5,
+                 handicap_max=1.6):
     """Factory for SubprocVecEnv workers. Must be a real module-level function, not a local
     closure defined inside `if __name__ == '__main__':` - Windows' multiprocessing 'spawn'
     start method re-imports this module fresh in each child process, and needs this name to
-    already exist at that point, before the __main__ guard's body would ever run there."""
+    already exist at that point, before the __main__ guard's body would ever run there.
+
+    The OpponentPool is constructed INSIDE _init, i.e. in the worker process. Building it in
+    the parent and passing it would require pickling loaded torch models across the process
+    boundary; building it here means each worker reads checkpoints off disk itself and picks
+    up new ones as training writes them."""
     def _init():
-        return CREnv(opponent_checkpoint_path=opponent_checkpoint_path)
+        env = CREnv(opponent_checkpoint_path=opponent_checkpoint_path)
+        if pool_dir is not None:
+            from opponents import OpponentPool
+            env.opponent_pool = OpponentPool(checkpoint_dir=pool_dir,
+                                              scripted_prob=scripted_prob,
+                                              handicap_range=(1.0, handicap_max))
+        return env
     return _init
 
 
@@ -232,6 +245,28 @@ if __name__ == '__main__':
                               "available, but pass --device cuda explicitly to be certain - "
                               "watch the 'Using ... device' line SB3 prints on startup to "
                               "confirm which one actually got used.")
+    parser.add_argument("--ent-coef", type=float, default=0.0,
+                         help="Entropy bonus. SB3 defaults to 0.0, i.e. NOTHING keeps the "
+                              "policy from committing early: the previous run's entropy_loss "
+                              "fell from -0.47 to -0.09, meaning it went nearly deterministic "
+                              "and stopped sampling alternatives at all. Once collapsed onto "
+                              "one strategy, multi-card plays are never tried again, so they "
+                              "cannot be discovered on merit. A small value (0.005-0.02) keeps "
+                              "exploration alive WITHOUT teaching any particular pattern.")
+    parser.add_argument("--opponent-pool", action="store_true",
+                         help="Train against a MIXTURE of opponents (random, scripted bots, "
+                              "past checkpoints) resampled every episode, instead of a single "
+                              "frozen self-snapshot. A single fixed opponent makes the enemy "
+                              "board predictable from the clock, which lets the policy become "
+                              "an open-loop script that ignores what the opponent does.")
+    parser.add_argument("--scripted-prob", type=float, default=0.5,
+                         help="Chance an episode draws a scripted/random bot rather than a "
+                              "past checkpoint.")
+    parser.add_argument("--handicap-max", type=float, default=1.6,
+                         help="Max elixir-regen multiplier for WEAK (scripted/random) "
+                              "opponents; drawn per-episode from [1.0, this]. Past "
+                              "checkpoints always play at 1.0. Makes weak bots threatening "
+                              "without altering any card's real stats.")
     parser.add_argument("--n-steps", type=int, default=2048,
                          help="Rollout length PER ENV before each PPO update. Total samples "
                               "per update = n_steps * n_envs. Costs nothing per simulated "
@@ -291,7 +326,8 @@ if __name__ == '__main__':
 
     ppo_kwargs = dict(n_steps=args.n_steps, batch_size=args.batch_size,
                        n_epochs=args.n_epochs, features_dim=args.features_dim,
-                       net_scale=args.net_scale, learning_rate=args.learning_rate)
+                       net_scale=args.net_scale, learning_rate=args.learning_rate,
+                       ent_coef=args.ent_coef)
 
     run_name = args.run_name or time.strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join("runs", run_name)
@@ -307,6 +343,11 @@ if __name__ == '__main__':
             "resource_weight": os.environ.get("CR_RESOURCE_WEIGHT", "0.05 (default)"),
             "spell_whiff_penalty": SPELL_WHIFF_PENALTY,
             "spell_hit_bonus": SPELL_HIT_BONUS,
+        },
+        "opponent": {
+            "pool": args.opponent_pool,
+            "scripted_prob": args.scripted_prob,
+            "handicap_max": args.handicap_max,
         },
     }
     write_manifest(run_dir, manifest)
@@ -343,7 +384,12 @@ if __name__ == '__main__':
         # policy.to(device) call, so train() ends up reading CPU-side buffer data against a
         # GPU-side policy the first time it actually runs - real crash, found on real hardware.
         model.save(opponent_checkpoint_path)
-        vec_env = SubprocVecEnv([make_env_fn(opponent_checkpoint_path) for _ in range(args.n_envs)])
+        pool_dir = os.path.join(run_dir, "checkpoints") if args.opponent_pool else None
+        vec_env = SubprocVecEnv([
+            make_env_fn(opponent_checkpoint_path, pool_dir=pool_dir,
+                         scripted_prob=args.scripted_prob,
+                         handicap_max=args.handicap_max)
+            for _ in range(args.n_envs)])
         resolved_device = args.device
         if resolved_device == "auto":
             resolved_device = "cuda" if torch.cuda.is_available() else "cpu"

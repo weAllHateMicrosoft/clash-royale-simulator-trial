@@ -4,7 +4,7 @@ from core import Position
 from card_utils import Card
 
 import gymnasium as gym
-from random import shuffle, randint
+from random import shuffle, randint, uniform
 import os
 import time
 import numpy as np
@@ -223,6 +223,10 @@ class CREnv(gym.Env):
         # _maybe_reload_opponent(). Only used when opponent_model isn't given directly.
         self.opponent_checkpoint_path = opponent_checkpoint_path
         self._opponent_mtime = None
+        # Set by train.py when opponent-mixture training is enabled; None keeps the old
+        # single-snapshot self-play behaviour exactly as it was.
+        self.opponent_pool = None
+        self._pool_opponent = None
         self.battle: battle.BattleState = None
         self.speed = speed
         self.observation_space = gym.spaces.Dict({
@@ -270,8 +274,23 @@ class CREnv(gym.Env):
         self._maybe_reload_opponent()
         shuffle(player_0_deck)
         shuffle(player_1_deck)
-        self.battle = battle.BattleState(player.PlayerState(0, player_0_deck[:], 5.0),
-                       player.PlayerState(1, player_1_deck[:], 5.0))
+
+        # Draw a fresh opponent per episode when a pool is configured. A single fixed
+        # opponent makes the enemy board predictable from the clock, which is what let the
+        # policy become an open-loop script; a varied opponent makes that fail.
+        handicap = 1.0
+        if self.opponent_pool is not None:
+            self._pool_opponent, handicap = self.opponent_pool.sample()
+
+        # Randomised starting elixir, same anti-script reasoning as shuffling the deck:
+        # anything that makes "what time is it" a worse predictor of the right move forces
+        # "what is on the board" to carry the load instead. The learner and the opponent
+        # draw independently so neither can infer the other's bank from its own.
+        p0_elixir = uniform(4.0, 7.0)
+        p1_elixir = uniform(4.0, 7.0)
+        self.battle = battle.BattleState(
+            player.PlayerState(0, player_0_deck[:], p0_elixir),
+            player.PlayerState(1, player_1_deck[:], p1_elixir, elixir_rate=handicap))
         if self.visualize:
             self.visualizer = Visualizer(self.battle)
         # Now return initial observation
@@ -279,7 +298,15 @@ class CREnv(gym.Env):
 
     def opponent_action(self):
         obs1 = self.observe(1)
-        opponent_action = self.opponent(obs1)
+        if self._pool_opponent is not None:
+            # Scripted bots read the battle state directly; checkpoint bots also need the
+            # observation. Dispatch on arity rather than type so new bots need no wiring.
+            try:
+                opponent_action = self._pool_opponent(self.battle, 1, obs1)
+            except TypeError:
+                opponent_action = self._pool_opponent(self.battle, 1)
+        else:
+            opponent_action = self.opponent(obs1)
         slot, y, x = decode_action(opponent_action)
         p1 = self.battle.players[1]
         if slot != 0:

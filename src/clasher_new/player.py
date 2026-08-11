@@ -3,14 +3,22 @@ from card_utils import Card
 # Hardcoded: max elixir is 10
 
 class PlayerState:
-    def __init__(self, player_id, cycle_queue, elixir, tower_hps=(4824, 3052, 3052)):
+    def __init__(self, player_id, cycle_queue, elixir, tower_hps=(4824, 3052, 3052),
+                 elixir_rate=1.0):
         self.player_id = player_id
         self.cycle = cycle_queue[:]
         self.elixir = elixir
         self.king_tower_hp, self.left_tower_hp, self.right_tower_hp = tower_hps
-    
+        # Training handicap ONLY. Multiplies this player's elixir regeneration so a weak
+        # opponent (e.g. a random-action bot) can be made genuinely threatening without
+        # touching any card's stats. Card stats are calibrated against real telemetry and
+        # changing them would teach the policy facts about a game that does not exist;
+        # an elixir handicap leaves every card behaving exactly as it really does and only
+        # changes how often the opponent gets to act. Always 1.0 for the learner.
+        self.elixir_rate = elixir_rate
+
     def regenerate_elixir(self, dt: float, base_regen_time: float = 2.8):
-        elixir_per_second = 1.0 / base_regen_time
+        elixir_per_second = self.elixir_rate / base_regen_time
         self.elixir = min(10, self.elixir + elixir_per_second * dt)
     
     def can_play_card(self, card_name):
