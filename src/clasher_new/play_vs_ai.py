@@ -327,9 +327,17 @@ def draw_ui(b: "battle.BattleState", paused, speed):
 
 
 def play_match(model, human_deck):
+    from random import shuffle as _shuffle
+    ai_deck = player_1_deck[:]
+    _shuffle(ai_deck)
     b = battle.BattleState(
         player.PlayerState(0, human_deck[:], 5.0),
-        player.PlayerState(1, player_1_deck[:], 5.0),
+        # Shuffle the AI's cycle every match. CREnv.reset() shuffles both decks each
+        # episode during training, so the model learned against varied cycles - but this
+        # tool did not, which made the AI's opening hand (and therefore its whole opening)
+        # identical in every match a human played against it, and made a varied policy look
+        # like a scripted one.
+        player.PlayerState(1, ai_deck, 5.0),
     )
 
     paused = False
@@ -390,10 +398,25 @@ def main():
     print(f"Loading model {CHECKPOINT}.zip ...")
     # Newer checkpoints are MaskablePPO; older ones are plain PPO. Try the masked loader
     # first and fall back, so any checkpoint in the repo's history still opens.
-    try:
-        model = MaskablePPO.load(CHECKPOINT, device="cpu")
-        print("Loaded as MaskablePPO (action masking active).")
-    except Exception:
+    # custom_objects supplies the feature extractor from THIS interpreter instead of the
+    # one pickled into the checkpoint. Necessary when the checkpoint was trained on a
+    # different Python version (the training box runs 3.11, this Mac runs 3.13): SB3
+    # pickles the extractor class by value, and 3.13 cannot read 3.11 bytecode - it fails
+    # with "unknown opcode". Weights themselves are version-independent tensors.
+    from train import CRFeatureExtractor
+    model = None
+    for feats, scale in ((512, 2.0), (256, 1.0)):
+        try:
+            model = MaskablePPO.load(CHECKPOINT, device="cpu", custom_objects={
+                "policy_kwargs": dict(
+                    features_extractor_class=CRFeatureExtractor,
+                    features_extractor_kwargs=dict(features_dim=feats, net_scale=scale)),
+            })
+            print(f"Loaded as MaskablePPO (features_dim={feats}, net_scale={scale}).")
+            break
+        except Exception:
+            continue
+    if model is None:
         model = PPO.load(CHECKPOINT, device="cpu")
         print("Loaded as plain PPO (pre-masking checkpoint, no action masking).")
     while True:
