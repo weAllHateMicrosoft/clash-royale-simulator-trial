@@ -8,11 +8,17 @@ collaborator or another AI model) as the starting context.**
 
 ## Bottom line
 
-**Not ready for training yet.** The underlying stat/rule calibration below is solid and
-telemetry-checked, but a live playtest in the web app just surfaced that troop-vs-troop
-interactions "feel disastrous" — unspecified, not yet diagnosed. Chasing that down is the
-#1 priority for whoever picks this up next, before starting any training run. See
-"Open issue" below.
+This doc now covers **simulator/engine work only** — training (reward design, PPO, action
+space, actual training runs) moved to a separate session, tracked in `TRAINING.md` and
+`ROADMAP.md`. Read those separately if you need that side of the picture.
+
+**Heads up, read before assuming anything is fine**: training was started anyway despite
+the open issue below never being resolved (time pressure, not a considered call that it
+didn't matter) - three real overnight runs have already happened on top of an engine whose
+troop-vs-troop interaction quality was never actually verified after the last round of
+placement-bug fixes. That's a real gap, not a solved problem quietly carried forward. If
+you're picking up simulator work now, the honest starting point is: the "disastrous
+interactions" report below is still exactly as unresolved as it was when first flagged.
 
 ## What's validated (confirmed against real data, not assumed)
 
@@ -46,6 +52,18 @@ interactions "feel disastrous" — unspecified, not yet diagnosed. Chasing that 
 - **Match rules**: deploy-zone boundaries after a tower falls (confirmed via real
   boundary-testing play), sudden-death tiebreak at 300s (was silently defaulting every
   tie to player 1 - fixed to represent real draws).
+
+## Fixed since the last handoff: King Tower / Projectile crash
+
+`take_damage()`'s King Tower activation check fired on *any* entity named `KingTower`,
+including the King Tower's own projectile (which carries that name for damage
+attribution, but isn't a `Building` and has no `tower_active` attribute) - crashed with
+`AttributeError: 'Projectile' object has no attribute 'tower_active'` the moment a King
+Tower actually fired. Only surfaced under real training load (a Fireball smoke test), not
+during earlier interactive playtesting - worth remembering that some bugs only show up
+once you're running enough matches, not just playing a few by hand. Fixed by guarding both
+call sites (`take_damage`, and the analogous check in `die()`) with
+`isinstance(entity, Building)`.
 
 ## Fixed since the last handoff: "I still can't place troops"
 
@@ -162,34 +180,10 @@ Share the repo URL with your collaborator, or paste it (plus this file's content
 new chat with another AI model as the starting context - this doc is written to be
 self-sufficient for that.
 
-## Training plan (next stage, after the open issue above is resolved)
+## Training (moved out of this doc)
 
-You said you have no ML/RL experience and want to learn by doing this - here's a concrete
-on-ramp, not just a reading list:
-
-1. **Don't train yet.** Fix or at least clearly understand the "disastrous interactions"
-   issue first - training on a broken engine teaches the agent to exploit the brokenness,
-   and you'll have to throw the run away.
-2. **First real step, once the engine's trustworthy**: run `train.py` for a *very* short
-   smoke test on your M2 Mac (a few minutes, tiny number of steps) - not to produce a good
-   agent, just to confirm the training loop itself runs end-to-end without crashing. This
-   is the cheapest possible way to learn the tooling risk-free.
-3. **Move to your friend's RTX 5050** for the first real training run once the smoke test
-   works. Keep it short at first (e.g. a few hours) and actually look at the results
-   before committing to a long run.
-4. **Reward design - this is the part you said you want to own.** Some framing that might
-   help since you're starting from zero: RL rewards are usually a mix of (a) sparse,
-   high-value signals tied to what actually wins the game (tower damage/destruction,
-   winning), and (b) denser shaping signals that help the agent learn faster early on
-   (elixir efficiency, not overcommitting into a bad trade) but risk teaching the wrong
-   lesson if weighted too heavily. Your CR knowledge is exactly what's needed to judge
-   that trade-off - start with a simple reward (tower HP delta + win/loss), watch what the
-   agent actually learns to do, and adjust from there rather than trying to design the
-   perfect reward up front.
-5. **GCP's $300 credit**: treat as overflow/parallel-experiment budget once you already
-   know a config works on the friend's GPU, not where you debug from scratch - GPU quota
-   approval has lag and hourly cost adds up fast if you're iterating.
-6. **Sanity-check like a human, not just via metrics**: periodically load a checkpoint
-   into `play_vs_ai.py` and play against it yourself. Win-rate-vs-a-frozen-baseline and
-   raw reward curves can look fine while the agent is doing something dumb that only a
-   real CR player would notice.
+Reward design, PPO setup, action-space design, and actual training runs are tracked
+separately now - see `TRAINING.md` (session-level status, the three overnight runs and
+their results, the reward-design framework) and `ROADMAP.md` (when/how a vectorized
+engine rewrite might make sense, longer-horizon planning). This doc stays scoped to the
+simulator/engine itself.

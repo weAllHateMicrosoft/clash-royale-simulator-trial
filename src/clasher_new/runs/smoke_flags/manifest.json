@@ -1,0 +1,30 @@
+{
+  "run_name": "smoke_flags",
+  "note": "verify flags",
+  "args": {
+    "timesteps": 600,
+    "checkpoint_name": null,
+    "save_freq": 100000,
+    "run_name": "smoke_flags",
+    "note": "verify flags",
+    "device": "cpu",
+    "resource_weight": 0.0,
+    "seed": 7,
+    "eval_freq": 999999,
+    "eval_games": 30,
+    "n_envs": 1
+  },
+  "git": {
+    "commit": "12c85cca59a435ab1b5b41e81aa1c7d6f9addc83",
+    "dirty": true
+  },
+  "start_time": "2026-08-10 20:03:18",
+  "status": "completed",
+  "effective_reward": {
+    "resource_weight": "0.0",
+    "spell_whiff_penalty": 0.0,
+    "spell_hit_bonus": 0.0
+  },
+  "end_time": "2026-08-10 20:04:32",
+  "final_timesteps": 2048
+}

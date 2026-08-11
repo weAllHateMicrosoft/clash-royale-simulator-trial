@@ -1,0 +1,2 @@
+timesteps,games,win_rate,loss_rate,draw_rate,mean_crowns_for,mean_crowns_against,mean_own_tower_hp,mean_enemy_tower_hp,mean_battle_time,noop_rate,illegal_rate,elixir_capped_rate,mean_reward
+300000,20,0.55,0.45,0.0,1.4,1.25,4483.35,4603.7,169.48583333336484,0.923609066823668,0.0,0.0,0.1767873358678898

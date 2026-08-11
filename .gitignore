@@ -1,7 +1,15 @@
 ideas/
 *.DS_store
 .DS_Store
-src/clahser_new/cr_logs/
+src/clasher_new/cr_logs/
+src/clasher_new/tb_logs/
+src/clasher_new/*.zip
+# training runs: keep manifest.json (small, human-readable record of what each run was and
+# what produced it) but exclude the heavy binary artifacts - model weights and tensorboard
+# event files don't belong in git history and would bloat the repo fast.
+src/clasher_new/runs/*/checkpoints/
+src/clasher_new/runs/*/tb/
+src/clasher_new/runs/*/model.zip
 .idea/
 *.xml
 *.iml

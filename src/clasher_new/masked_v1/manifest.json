@@ -1,0 +1,30 @@
+{
+  "run_name": "masked_v1",
+  "note": "masked + optimized sim: MaskablePPO, masked random baseline, resource-potential reward",
+  "args": {
+    "timesteps": 8000000,
+    "checkpoint_name": null,
+    "save_freq": 10000,
+    "run_name": "masked_v1",
+    "note": "masked + optimized sim: MaskablePPO, masked random baseline, resource-potential reward",
+    "device": "cuda",
+    "resource_weight": null,
+    "seed": null,
+    "eval_freq": 300000,
+    "eval_games": 20,
+    "n_envs": 16
+  },
+  "git": {
+    "commit": "916b331aa96a70437ed4bd29ca17385f24d08eb2",
+    "dirty": true
+  },
+  "start_time": "2026-08-10 20:15:58",
+  "status": "stopped_early",
+  "effective_reward": {
+    "resource_weight": "0.05 (default)",
+    "spell_whiff_penalty": 0.0,
+    "spell_hit_bonus": 0.0
+  },
+  "end_time": "2026-08-10 21:16:22",
+  "final_timesteps": 458752
+}

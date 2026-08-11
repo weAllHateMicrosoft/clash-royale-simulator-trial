@@ -1,0 +1,20 @@
+{
+  "run_name": "first_prototype",
+  "note": "First real prototype run. Baseline reward (tower/crown HP deltas + win/loss), self-play from scratch, default PPO hyperparams. Goal: confirm it learns something non-random and gather real behavior to look at (incl. whether card/position choices look context-aware).",
+  "args": {
+    "timesteps": 100000,
+    "checkpoint_name": null,
+    "save_freq": 10000,
+    "run_name": "first_prototype",
+    "note": "First real prototype run. Baseline reward (tower/crown HP deltas + win/loss), self-play from scratch, default PPO hyperparams. Goal: confirm it learns something non-random and gather real behavior to look at (incl. whether card/position choices look context-aware)."
+  },
+  "git": {
+    "commit": "c35f47b1b0e499ec4f2693f1dfafd3687a8e587d",
+    "dirty": true
+  },
+  "start_time": "2026-08-09 18:10:12",
+  "status": "failed",
+  "error": "KeyboardInterrupt()",
+  "end_time": "2026-08-09 18:24:57",
+  "final_timesteps": 33231
+}

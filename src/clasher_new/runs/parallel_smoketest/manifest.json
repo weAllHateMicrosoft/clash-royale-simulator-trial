@@ -1,0 +1,22 @@
+{
+  "run_name": "parallel_smoketest",
+  "note": "smoke test: SubprocVecEnv parallel rollout collection with file-synced self-play opponent",
+  "args": {
+    "timesteps": 6000,
+    "checkpoint_name": null,
+    "save_freq": 2000,
+    "run_name": "parallel_smoketest",
+    "note": "smoke test: SubprocVecEnv parallel rollout collection with file-synced self-play opponent",
+    "device": "auto",
+    "n_envs": 2
+  },
+  "git": {
+    "commit": "c35f47b1b0e499ec4f2693f1dfafd3687a8e587d",
+    "dirty": true
+  },
+  "start_time": "2026-08-10 13:03:06",
+  "status": "failed",
+  "error": "EOFError()",
+  "end_time": "2026-08-10 13:03:08",
+  "final_timesteps": 0
+}
